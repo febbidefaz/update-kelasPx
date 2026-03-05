@@ -46,68 +46,113 @@
 </div>
 
 <script>
-const token = @json($token);
-let es = null;
+  const token = @json($token);
+  const runUrl = @json(url("sync-kelas/run/$token"));  // otomatis ikut subfolder
+  let es = null;
+  let retryCount = 0;
 
-function addLog(line){
-  const el = document.getElementById('log');
-  el.innerHTML += line + "<br>";
-  el.scrollTop = el.scrollHeight;
-}
+  function addLog(line){
+    try {
+      const el = document.getElementById('log');
+      el.innerHTML += line.replace(/</g,'&lt;') + "<br>";
+      el.scrollTop = el.scrollHeight;
+      console.debug('LOG:', line);
+    } catch(e) {
+      console.error('addLog error', e);
+    }
+  }
 
-function setBar(i,total){
-  const pct = total ? Math.floor((i/total)*100) : 0;
-  const bar = document.getElementById('bar');
-  bar.style.width = pct + "%";
-  bar.textContent = pct + "%";
-}
+  function setBar(i, total){
+    try {
+      const pct = total ? Math.floor((i/total)*100) : 0;
+      const bar = document.getElementById('bar');
+      bar.style.width = pct + "%";
+      bar.textContent = pct + "%";
+    } catch(e) {
+      console.error('setBar error', e);
+    }
+  }
 
-function start(){
-  if(es) es.close();
-  es = new EventSource(`/sync-kelas/run/${encodeURIComponent(token)}`);
-
-  es.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-
-    if(data.type === 'start'){
-      document.getElementById('runId').textContent = data.runId;
-      document.getElementById('logFile').textContent = data.logFile;
-      document.getElementById('total').textContent = data.total;
-      addLog(`Mulai… total pasien: ${data.total}`);
-      return;
+  function start(){
+    if(es) {
+      try { es.close(); } catch(e){/*ignore*/ }
+      es = null;
     }
 
-    if(data.type === 'row'){
-      setBar(data.i, data.total);
+    console.info('Connecting SSE ->', runUrl);
+    addLog(`Mencoba koneksi ke ${runUrl} ...`);
 
-      // update counters realtime (server kirim angka terbaru)
-      document.getElementById('updated').textContent = data.updated;
-      document.getElementById('same').textContent    = data.same;
-      document.getElementById('failed').textContent  = data.failed;
+    es = new EventSource(runUrl);
 
-      addLog(data.line);
-      return;
-    }
+    es.onopen = function(){
+      console.info('SSE open');
+      addLog("Koneksi SSE terbuka.");
+      retryCount = 0;
+    };
 
-    if(data.type === 'done'){
-      setBar(data.total, data.total);
-      document.getElementById('total').textContent   = data.total;
-      document.getElementById('updated').textContent = data.updated;
-      document.getElementById('same').textContent    = data.same;
-      document.getElementById('failed').textContent  = data.failed;
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.debug('SSE message:', data);
 
-      addLog(`Selesai ✅ Updated=${data.updated}, Same=${data.same}, Error=${data.failed}, Skipped=${data.skipped}`);
-      es.close();
-    }
-  };
+        if(data.type === 'start'){
+          document.getElementById('runId').textContent = data.runId ?? '-';
+          document.getElementById('logFile').textContent = data.logFile ?? '-';
+          document.getElementById('total').textContent = data.total ?? 0;
+          addLog(`Mulai… total pasien: ${data.total}`);
+          return;
+        }
 
-  es.onerror = () => {
-    addLog("Koneksi SSE terputus.");
-    if(es) es.close();
-  };
-}
+        if(data.type === 'row'){
+          // Pastikan fields ada
+          const i = data.i ?? 0;
+          const total = data.total ?? (parseInt(document.getElementById('total').textContent) || 0);
 
-start(); // auto-run saat page dibuka
+          setBar(i, total);
+
+          // update counters realtime (server kirim angka terbaru)
+          if (typeof data.updated !== 'undefined') document.getElementById('updated').textContent = data.updated;
+          if (typeof data.same !== 'undefined')    document.getElementById('same').textContent    = data.same;
+          if (typeof data.failed !== 'undefined')  document.getElementById('failed').textContent  = data.failed;
+
+          // line bisa berupa string; lindungi dari tag html
+          addLog(data.line ?? JSON.stringify(data));
+          return;
+        }
+
+        if(data.type === 'done'){
+          setBar(data.total, data.total);
+          document.getElementById('total').textContent   = data.total ?? document.getElementById('total').textContent;
+          document.getElementById('updated').textContent = data.updated ?? document.getElementById('updated').textContent;
+          document.getElementById('same').textContent    = data.same ?? document.getElementById('same').textContent;
+          document.getElementById('failed').textContent  = data.failed ?? document.getElementById('failed').textContent;
+
+          addLog(`Selesai ✅ Updated=${data.updated}, Same=${data.same}, Error=${data.failed}, Skipped=${data.skipped}`);
+          try { es.close(); } catch(e){/*ignore*/}
+          es = null;
+        }
+
+      } catch (e) {
+        console.error('SSE parse error:', e, event.data);
+        addLog("Terima data bermasalah (lihat console).");
+      }
+    };
+
+    es.onerror = (err) => {
+      console.warn('SSE error', err);
+      addLog("Koneksi SSE terputus. Mencoba reconnect...");
+      try { es.close(); } catch(e){/*ignore*/}
+      es = null;
+
+      // reconnect dengan backoff singkat
+      retryCount++;
+      const wait = Math.min(10000, 1000 + (retryCount * 2000)); // up to 10s
+      setTimeout(start, wait);
+    };
+  }
+
+  // start otomatis saat page dibuka
+  start();
 </script>
 
 </body>
